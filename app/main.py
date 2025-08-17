@@ -3,9 +3,46 @@ import json
 import subprocess
 import uuid
 import time
+import sys
+import warnings
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, Dict
+
+# Suppress gRPC shutdown warnings that appear during process termination
+warnings.filterwarnings("ignore", message=".*POLLER.*")
+warnings.filterwarnings("ignore", message=".*grpc.*shutdown.*")
+warnings.filterwarnings("ignore", message=".*cygrpc.*")
+
+# Also suppress at the exception level
+import logging
+logging.getLogger("grpc").setLevel(logging.CRITICAL)
+
+# Custom stderr handler to filter gRPC shutdown errors
+class FilteredStderr:
+    def __init__(self, original_stderr):
+        self.original_stderr = original_stderr
+    
+    def write(self, message):
+        # Filter out gRPC shutdown error messages
+        if any(pattern in str(message) for pattern in [
+            "AttributeError: 'NoneType' object has no attribute 'POLLER'",
+            "grpc._cython.cygrpc",
+            "shutdown_grpc_aio",
+            "_actual_aio_shutdown",
+            "AioChannel.__dealloc__"
+        ]):
+            return  # Suppress these messages
+        self.original_stderr.write(message)
+    
+    def flush(self):
+        self.original_stderr.flush()
+    
+    def __getattr__(self, name):
+        return getattr(self.original_stderr, name)
+
+# Install the filtered stderr handler
+sys.stderr = FilteredStderr(sys.stderr)
 
 import aiohttp
 from fastapi import FastAPI, WebSocket, HTTPException, Request
@@ -17,13 +54,17 @@ from pipecat.transports.services.helpers.daily_rest import DailyRESTHelper, Dail
 # Import necessary components from the new structure
 from app.ws.live_session import handle_websocket_session, get_active_connections, get_shutdown_event
 from app.core.logger import logger
-from app.core.config import DAILY_API_KEY, DAILY_API_URL, PORT, HOST
+from app.core.config import DAILY_API_KEY, DAILY_API_URL, PORT, HOST, ENVIRONMENT
 from app import __version__
 from app.schemas import AutomaticVoiceUserConnectRequest
 from app.agents.voice.breeze_buddy.breeze.order_confirmation.types import BreezeOrderData
 from app.agents.voice.breeze_buddy.breeze.order_confirmation.websocket_bot import main as telephony_websocket_conn
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
+
+# Import for direct voice agent execution in dev mode
+if ENVIRONMENT == "dev":
+    from app.agents.voice.automatic import main as voice_agent_main
 from starlette.websockets import WebSocketDisconnect
 from app.core.config import (
     TWILIO_ACCOUNT_SID,
@@ -220,47 +261,105 @@ async def bot_connect(request: AutomaticVoiceUserConnectRequest) -> Dict[str, An
     session_id = str(uuid.uuid4())
     logger.bind(session_id=session_id).info(f"Generated session ID for new voice agent: {session_id}")
 
-    # 4. Build command args list
-    bot_file = "app.agents.voice.automatic"
-    cmd = [
-        "python3", "-m", bot_file,
-        "-u", room.url,
-        "-t", token,
-        "--mode", raw_mode.upper() if raw_mode else None,
-        "--session-id", session_id,
-    ]
+    # 4. Launch voice agent (subprocess in production, direct execution in dev)
+    if ENVIRONMENT == "dev":
+        # Run voice agent directly in the same process for easier debugging
+        logger.bind(session_id=session_id).info("Running voice agent directly in development mode")
+        
+        # Create a background task to run the voice agent
+        import sys
+        import asyncio
+        
+        # Mock sys.argv to simulate command line arguments
+        original_argv = sys.argv.copy()
+        sys.argv = [
+            "voice_agent",
+            "-u", room.url,
+            "-t", token,
+            "--session-id", session_id,
+        ]
+        
+        # Add optional arguments
+        if raw_mode:
+            sys.argv.extend(["--mode", raw_mode.upper()])
+        if user_name:
+            sys.argv.extend(["--user-name", user_name])
+        if tts_provider:
+            sys.argv.extend(["--tts-provider", tts_provider])
+        if voice_name:
+            sys.argv.extend(["--voice-name", voice_name])
+        if euler_tok:
+            sys.argv.extend(["--euler-token", euler_tok])
+        if breeze_tok:
+            sys.argv.extend(["--breeze-token", breeze_tok])
+        if shop_url:
+            sys.argv.extend(["--shop-url", shop_url])
+        if shop_id:
+            sys.argv.extend(["--shop-id", shop_id])
+        if shop_type:
+            sys.argv.extend(["--shop-type", shop_type])
+        if merchant_id:
+            sys.argv.extend(["--merchant-id", merchant_id])
+        if platform_integrations:
+            sys.argv.extend(["--platform-integrations"] + platform_integrations)
+        
+        # Create and run the voice agent as a background task
+        async def run_voice_agent():
+            try:
+                await voice_agent_main()
+            except Exception as e:
+                logger.error(f"Voice agent error: {e}")
+            finally:
+                # Restore original argv
+                sys.argv = original_argv
+        
+        # Start the voice agent as a background task
+        asyncio.create_task(run_voice_agent())
+        
+        logger.bind(session_id=session_id).info("Voice agent started directly in development mode")
+    else:
+        # Production mode: use subprocess as before
+        # 4. Build command args list
+        bot_file = "app.agents.voice.automatic"
+        cmd = [
+            "python3", "-m", bot_file,
+            "-u", room.url,
+            "-t", token,
+            "--mode", raw_mode.upper() if raw_mode else None,
+            "--session-id", session_id,
+        ]
 
-    # Add user_name and tts_service regardless of mode
-    if user_name:
-        cmd += ["--user-name", user_name]
-    if tts_provider:
-        cmd += ["--tts-provider", tts_provider]
-    if voice_name:
-        cmd += ["--voice-name", voice_name]
-    if euler_tok:
-        cmd += ["--euler-token", euler_tok]
-    if breeze_tok:
-        cmd += ["--breeze-token", breeze_tok]
-    if shop_url:
-        cmd += ["--shop-url", shop_url]
-    if shop_id:
-        cmd += ["--shop-id", shop_id]
-    if shop_type:
-        cmd += ["--shop-type", shop_type]
-    if merchant_id:
-        cmd += ["--merchant-id", merchant_id]
-    if platform_integrations:
-        cmd += ["--platform-integrations"] + platform_integrations
+        # Add user_name and tts_service regardless of mode
+        if user_name:
+            cmd += ["--user-name", user_name]
+        if tts_provider:
+            cmd += ["--tts-provider", tts_provider]
+        if voice_name:
+            cmd += ["--voice-name", voice_name]
+        if euler_tok:
+            cmd += ["--euler-token", euler_tok]
+        if breeze_tok:
+            cmd += ["--breeze-token", breeze_tok]
+        if shop_url:
+            cmd += ["--shop-url", shop_url]
+        if shop_id:
+            cmd += ["--shop-id", shop_id]
+        if shop_type:
+            cmd += ["--shop-type", shop_type]
+        if merchant_id:
+            cmd += ["--merchant-id", merchant_id]
+        if platform_integrations:
+            cmd += ["--platform-integrations"] + platform_integrations
 
-    # 5. Launch subprocess without shell
-    logger.bind(session_id=session_id).info(f"Launching subprocess with command: {' '.join(cmd)}")
-    proc = subprocess.Popen(
-        cmd,
-        cwd=Path(__file__).parent.parent,
-        bufsize=1,
-    )
-    bot_procs[proc.pid] = (proc, room.url)
-    logger.bind(session_id=session_id).info(f"Subprocess started with PID: {proc.pid}")
+        # 5. Launch subprocess without shell
+        logger.bind(session_id=session_id).info(f"Launching subprocess with command: {' '.join(cmd)}")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=Path(__file__).parent.parent,
+            bufsize=1,
+        )
+        bot_procs[proc.pid] = (proc, room.url)
+        logger.bind(session_id=session_id).info(f"Subprocess started with PID: {proc.pid}")
 
     return {"room_url": room.url, "token": token}
 

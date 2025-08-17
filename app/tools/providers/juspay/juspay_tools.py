@@ -5,7 +5,7 @@ import aiohttp
 # No direct import of types.Tool here, only declarations for Gemini are needed by the service layer
 # from google.genai import types # Not strictly needed here anymore for Tool object creation
 
-from app.core.config import GENIUS_API_URL
+from app.core.config import GENIUS_API_URL, ENVIRONMENT
 from app.core.logger import logger
 
 # ---- Function Declarations (as before) ----
@@ -77,8 +77,97 @@ def get_formatted_time_range(input_data):
         end_time = datetime.datetime.now(tz).isoformat()
     return {"formattedStartTime": start_time, "formattedEndTime": end_time}
 
+def get_mock_response(metric, dimensions):
+    """Generate mock responses for development environment"""
+    
+    if metric == "success_rate":
+        if not dimensions:  # Overall success rate
+            return json.dumps({
+                "success_rate": 78.5,
+                "total_transactions": 12543,
+                "successful_transactions": 9846,
+                "componentType": "METRIC"
+            })
+        elif "payment_method_type" in dimensions:  # Payment method wise SR
+            return json.dumps({
+                "data": [
+                    {"payment_method_type": "UPI", "success_rate": 82.3, "transactions": 6234},
+                    {"payment_method_type": "Credit Card", "success_rate": 76.8, "transactions": 3245},
+                    {"payment_method_type": "Debit Card", "success_rate": 74.2, "transactions": 1876},
+                    {"payment_method_type": "Net Banking", "success_rate": 71.5, "transactions": 987},
+                    {"payment_method_type": "Wallet", "success_rate": 79.1, "transactions": 201}
+                ],
+                "componentType": "DONUT_CHART"
+            })
+    
+    elif metric == "order_with_transactions":
+        return json.dumps({
+            "failure_data": [
+                {"error_message": "Insufficient funds", "payment_method_type": "Debit Card", "count": 234},
+                {"error_message": "Card declined", "payment_method_type": "Credit Card", "count": 187},
+                {"error_message": "UPI timeout", "payment_method_type": "UPI", "count": 156},
+                {"error_message": "Bank server down", "payment_method_type": "Net Banking", "count": 98},
+                {"error_message": "Invalid PIN", "payment_method_type": "Debit Card", "count": 76}
+            ],
+            "componentType": "BAR_CHART"
+        })
+    
+    elif metric == "success_volume":
+        return json.dumps({
+            "data": [
+                {"payment_method_type": "UPI", "successful_transactions": 5127},
+                {"payment_method_type": "Credit Card", "successful_transactions": 2492},
+                {"payment_method_type": "Debit Card", "successful_transactions": 1391},
+                {"payment_method_type": "Net Banking", "success_volume": 706},
+                {"payment_method_type": "Wallet", "success_volume": 159}
+            ],
+            "componentType": "DONUT_CHART"
+        })
+    
+    elif metric == "total_amount":
+        return json.dumps({
+            "data": [
+                {"payment_method_type": "UPI", "total_amount": 2956734.50, "currency": "INR"},
+                {"payment_method_type": "Credit Card", "total_amount": 4521876.75, "currency": "INR"},
+                {"payment_method_type": "Debit Card", "total_amount": 1876234.25, "currency": "INR"},
+                {"payment_method_type": "Net Banking", "total_amount": 987456.80, "currency": "INR"},
+                {"payment_method_type": "Wallet", "total_amount": 234567.90, "currency": "INR"}
+            ],
+            "total_gmv": 10576869.20,
+            "componentType": "DONUT_CHART"
+        })
+    
+    elif metric == "avg_ticket_size":
+        return json.dumps({
+            "data": [
+                {"payment_method_type": "UPI", "avg_ticket_size": 576.45, "currency": "INR"},
+                {"payment_method_type": "Credit Card", "avg_ticket_size": 1394.32, "currency": "INR"},
+                {"payment_method_type": "Debit Card", "avg_ticket_size": 1348.67, "currency": "INR"},
+                {"payment_method_type": "Net Banking", "avg_ticket_size": 1398.23, "currency": "INR"},
+                {"payment_method_type": "Wallet", "avg_ticket_size": 1475.89, "currency": "INR"}
+            ],
+            "overall_avg_ticket": 843.51,
+            "componentType": "BAR_CHART"
+        })
+    
+    else:
+        return json.dumps({
+            "message": f"Mock data for metric: {metric}",
+            "dimensions": dimensions,
+            "componentType": "METRIC"
+        })
+
 async def make_genius_api_request(payload, juspay_token, session_id=None):
     session_prefix = f"[{session_id}] " if session_id else ""
+    
+    # Return mock data in development environment
+    if ENVIRONMENT.lower() in ["development", "dev"]:
+        metric = payload.get('metric')
+        dimensions = payload.get('dimensions', [])
+        logger.info(f"{session_prefix}🧪 DEV MODE: Returning mock data for metric: {metric}, dimensions: {dimensions}")
+        return get_mock_response(metric, dimensions)
+    
+    # Production API call
     logger.info(f"{session_prefix}Genius API request: {GENIUS_API_URL}, metric: {payload.get('metric')}, domain: {payload.get('domain')}")
     try:
         headers = {'Content-Type': 'application/json', 'x-web-logintoken': juspay_token}

@@ -100,22 +100,27 @@ class MCPClient:
 
             if not response_dict.get("result") or not response_dict["result"].get("tools"):
                 logger.warning("Tool registration response was successful but contained no tools.")
-                return ToolsSchema(standard_tools=[])
-
-            raw_tools = response_dict["result"]["tools"]
+                mcp_tools = []
+            else:
+                raw_tools = response_dict["result"]["tools"]
+                mcp_tools = []
+                for tool_data in raw_tools:
+                    tool_name = tool_data["name"]
+                    logger.debug(f"Registering remote tool: {tool_name}")
+                    
+                    function_schema = self._convert_schema(tool_data)
+                    mcp_tools.append(function_schema)
+                    
+                    llm.register_function(tool_name, self._mcp_tool_wrapper)
             
-            converted_tools = []
-            for tool_data in raw_tools:
-                tool_name = tool_data["name"]
-                logger.debug(f"Registering remote tool: {tool_name}")
-                
-                function_schema = self._convert_schema(tool_data)
-                converted_tools.append(function_schema)
-                
-                llm.register_function(tool_name, self._mcp_tool_wrapper)
-                
-            logger.info(f"Successfully registered {len(converted_tools)} remote tools.")
-            return ToolsSchema(standard_tools=converted_tools)
+            # Register chart tools alongside MCP tools
+            chart_tools = self._register_chart_tools(llm)
+            
+            # Combine MCP tools and chart tools
+            all_tools = mcp_tools + chart_tools
+            
+            logger.info(f"Successfully registered {len(mcp_tools)} MCP tools + {len(chart_tools)} chart tools = {len(all_tools)} total tools.")
+            return ToolsSchema(standard_tools=all_tools)
         except Exception as e:
             logger.error(f"Failed to register tools from remote server: {e}")
             return ToolsSchema(standard_tools=[])
@@ -129,6 +134,72 @@ class MCPClient:
             properties=tool.input_schema.properties,
             required=tool.input_schema.required or [],
         )
+
+    def _register_chart_tools(self, llm) -> list[FunctionSchema]:
+        """Register chart generation tools that should always be available."""
+        from app.tools.providers.system.chart_tools import (
+            generate_bar_chart, 
+            generate_line_chart, 
+            generate_donut_chart
+        )
+        from app.tools.providers.system.system_tools import (
+            generate_bar_chart_declaration,
+            generate_line_chart_declaration, 
+            generate_donut_chart_declaration
+        )
+        
+        chart_tools = {
+            "generate_bar_chart": (generate_bar_chart, generate_bar_chart_declaration),
+            "generate_line_chart": (generate_line_chart, generate_line_chart_declaration), 
+            "generate_donut_chart": (generate_donut_chart, generate_donut_chart_declaration)
+        }
+        
+        chart_schemas = []
+        for name, (function, declaration) in chart_tools.items():
+            # Create wrapper function for LLM service compatibility
+            def create_chart_wrapper(func):
+                async def chart_wrapper(function_name: str, tool_call_id: str, arguments: Dict[str, Any], llm, context, result_callback):
+                    try:
+                        # Add session_id to arguments if not present
+                        if 'session_id' not in arguments:
+                            # Extract session_id from context if available
+                            session_id = None
+                            if context:
+                                # Try multiple ways to get session_id from context
+                                session_id = (getattr(context, 'session_id', None) or 
+                                             getattr(context, '_session_id', None) or
+                                             context.get('session_id') if hasattr(context, 'get') else None)
+                            
+                            # If still no session_id, try to extract from function_name or other sources
+                            if not session_id:
+                                # You could extract from some global state or logging context here
+                                from app.utils.session_context import get_current_session_id
+                                session_id = get_current_session_id()
+                            
+                            arguments['session_id'] = session_id
+                        
+                        # Call the actual chart function with unpacked arguments
+                        result = await func(**arguments)
+                        await result_callback(result)
+                    except Exception as e:
+                        logger.error(f"Chart wrapper error for {function_name}: {e}")
+                        await result_callback(f"Error generating chart: {str(e)}")
+                return chart_wrapper
+            
+            wrapper = create_chart_wrapper(function)
+            llm.register_function(name, wrapper)
+            
+            # Convert to FunctionSchema format
+            schema = FunctionSchema(
+                name=declaration["name"],
+                description=declaration["description"],
+                properties=declaration["parameters"]["properties"],
+                required=declaration["parameters"]["required"]
+            )
+            chart_schemas.append(schema)
+        
+        logger.info(f"✅ Registered {len(chart_tools)} chart tools in MCP client: {list(chart_tools.keys())}")
+        return chart_schemas
 
     async def _mcp_tool_wrapper(
         self, function_name: str, tool_call_id: str, arguments: Dict[str, Any],

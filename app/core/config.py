@@ -37,11 +37,11 @@ ENABLE_NOISE_REDUCE_FILTER = os.environ.get("ENABLE_NOISE_REDUCE_FILTER", "true"
 
 # TTS Configuration
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
-ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "bQQWtYx9EodAqMdkrNAc") # bQQWtYx9EodAqMdkrNAc
-ELEVENLABS_RHEA_VOICE_ID = os.environ.get("ELEVENLABS_RHEA_VOICE_ID", "bQQWtYx9EodAqMdkrNAc")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "9BWtsMINqrJLrRacOk9x") # bQQWtYx9EodAqMdkrNAc
+ELEVENLABS_RHEA_VOICE_ID = os.environ.get("ELEVENLABS_RHEA_VOICE_ID", "9BWtsMINqrJLrRacOk9x")
 ELEVENLABS_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
 ELEVENLABS_VOICE_SPEED = float(os.environ.get("ELEVENLABS_VOICE_SPEED", 1.15))
-ELEVENLABS_BB_VOICE_ID = os.environ.get("ELEVENLABS_BB_VOICE_ID", "bQQWtYx9EodAqMdkrNAc")
+ELEVENLABS_BB_VOICE_ID = os.environ.get("ELEVENLABS_BB_VOICE_ID", "9BWtsMINqrJLrRacOk9x")
 GOOGLE_BRET_VOICE = os.environ.get("GOOGLE_BRET_VOICE", "en-IN-Chirp3-HD-Sadaltager")
 GOOGLE_MIA_VOICE = os.environ.get("GOOGLE_MIA_VOICE", "en-IN-Chirp3-HD-Despina")
 
@@ -86,6 +86,19 @@ logger.info(f"Shops enabled for Automatic MCP Server: {SHOPS_FOR_AUTOMATIC_MCP_S
 ENABLE_SUMMARIZATION = os.environ.get("ENABLE_SUMMARIZATION", "true").lower() == "true"
 MAX_TURNS_BEFORE_SUMMARY = int(os.environ.get("MAX_TURNS_BEFORE_SUMMARY", 10))
 KEEP_RECENT_TURNS = int(os.environ.get("KEEP_RECENT_TURNS", 2))
+
+# Speechmatics Configuration
+SPEECHMATICS_API_KEY = os.environ.get("SPEECHMATICS_API_KEY")  # Note: Matches your .env spelling
+ENABLE_SPEAKER_DIARIZATION = os.environ.get("ENABLE_SPEAKER_DIARIZATION", "true").lower() == "true"
+SPEAKER_SENSITIVITY = float(os.environ.get("SPEAKER_SENSITIVITY", "0.5"))
+MAX_SPEAKERS = int(os.environ.get("MAX_SPEAKERS", "5"))
+ENABLE_VOICE_LOCKING = os.environ.get("ENABLE_VOICE_LOCKING", "true").lower() == "true"
+
+# Debug: Log Speechmatics configuration on startup
+logger.info(f"[CONFIG-DEBUG] Speechmatics configuration loaded:")
+logger.info(f"[CONFIG-DEBUG] - SPEECHMATICS_API_KEY: '{SPEECHMATICS_API_KEY}'")
+logger.info(f"[CONFIG-DEBUG] - ENABLE_SPEAKER_DIARIZATION: {ENABLE_SPEAKER_DIARIZATION}")
+logger.info(f"[CONFIG-DEBUG] - ENABLE_VOICE_LOCKING: {ENABLE_VOICE_LOCKING}")
 
 # Twilio settings
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")

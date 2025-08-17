@@ -16,16 +16,20 @@ from app.agents.voice.automatic.services.llm_wrapper import LLMServiceWrapper
 from pipecat.services.azure.llm import AzureLLMService
 from pipecat.services.google.stt import GoogleSTTService
 from pipecat.transcriptions.language import Language
+from app.services.speaker_diarization import speaker_diarization_service
 from pipecat.frames.frames import TTSSpeakFrame, BotSpeakingFrame, LLMFullResponseEndFrame
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIProcessor
 from pipecat.services.google.rtvi import GoogleRTVIObserver
+from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIObserverParams
+# XMLCleaningProcessor removed - using LLMSpyProcessor for highlight extraction
 
 from app.core import config
 from app.agents.voice.automatic.services.mcp.automatic_client import MCPClient
 from .processors import LLMSpyProcessor
 from .prompts import get_system_prompt
 from .tools import initialize_tools
+from .services.mock_stt import TestQuestionProcessor, DEFAULT_TEST_QUESTIONS
 from .tts import get_tts_service
 from app.agents.voice.automatic.types import (
     TTSProvider,
@@ -61,8 +65,14 @@ async def main():
     args = parser.parse_args()
 
     # Configure logger with session ID for all logs in this subprocess
-    configure_session_logger(args.session_id)
+    # configure_session_logger(args.session_id)
     logger.info(f"Voice agent started with session ID: {args.session_id}")
+    logger.info("[VOICE-FLOW] testing 1")
+    
+    # Set global session context for chart tools
+    from app.utils.session_context import set_current_session_id
+    set_current_session_id(args.session_id)
+    configure_session_logger(args.session_id)
 
     # Decode TTS parameters
     tts_provider = decode_tts_provider(args.tts_provider)
@@ -93,10 +103,11 @@ async def main():
     )
 
     if config.ENABLE_NOISE_REDUCE_FILTER:
-        logger.info("Noise reduction filter enabled.")
+        # logger.info("Noise reduction filter enabled.")
         daily_params.audio_in_filter = NoisereduceFilter()
     else:
-        logger.info("Noise reduction filter disabled.")
+        # logger.info("Noise reduction filter disabled.")
+        pass
 
     transport = DailyTransport(
         args.url,
@@ -105,12 +116,37 @@ async def main():
         daily_params,
     )
 
-    stt = GoogleSTTService(
-        params=GoogleSTTService.InputParams(languages=[Language.EN_US, Language.EN_IN], enable_interim_results=False),
-        credentials=config.GOOGLE_CREDENTIALS_JSON
-    )
-
-    tts = get_tts_service(tts_provider=tts_provider.value, voice_name=voice_name.value)
+    # Choose STT service based on speaker diarization configuration
+    logger.info(f"[VOICE-DEBUG] Configuration check:")
+    logger.info(f"[VOICE-DEBUG] - ENABLE_SPEAKER_DIARIZATION: {config.ENABLE_SPEAKER_DIARIZATION}")
+    logger.info(f"[VOICE-DEBUG] - SPEECHMATICS_API_KEY present: {bool(config.SPEECHMATICS_API_KEY)}")
+    logger.info(f"[VOICE-DEBUG] - SPEECHMATICS_API_KEY value: '{config.SPEECHMATICS_API_KEY}'")
+    logger.info(f"[VOICE-DEBUG] - ENABLE_VOICE_LOCKING: {config.ENABLE_VOICE_LOCKING}")
+    
+    if config.ENABLE_SPEAKER_DIARIZATION and config.SPEECHMATICS_API_KEY:
+        logger.info("[VOICE-DEBUG] ✅ Using Speechmatics STT with speaker diarization")
+        try:
+            stt, voice_locking_processor = speaker_diarization_service.create_stt_with_voice_locking(
+                languages=[Language.EN_US, Language.EN_IN]
+            )
+            logger.info("[VOICE-DEBUG] ✅ Speechmatics STT service created successfully")
+            logger.info(f"[VOICE-DEBUG] ✅ Voice locking processor created: {voice_locking_processor is not None}")
+        except Exception as e:
+            logger.error(f"[VOICE-DEBUG] ❌ Failed to create Speechmatics STT: {e}")
+            logger.info("[VOICE-DEBUG] 🔄 Falling back to Google STT")
+            stt = GoogleSTTService(
+                params=GoogleSTTService.InputParams(languages=[Language.EN_US, Language.EN_IN], enable_interim_results=False),
+                credentials=config.GOOGLE_CREDENTIALS_JSON
+            )
+            voice_locking_processor = None
+    else:
+        logger.info("[VOICE-DEBUG] ✅ Using Google STT (no speaker diarization)")
+        logger.info(f"[VOICE-DEBUG] - Reason: Diarization={config.ENABLE_SPEAKER_DIARIZATION}, API_Key={bool(config.SPEECHMATICS_API_KEY)}")
+        stt = GoogleSTTService(
+            params=GoogleSTTService.InputParams(languages=[Language.EN_US, Language.EN_IN], enable_interim_results=False),
+            credentials=config.GOOGLE_CREDENTIALS_JSON
+        )
+        voice_locking_processor = None
 
     llm = LLMServiceWrapper(AzureLLMService(
         api_key=config.AZURE_OPENAI_API_KEY,
@@ -119,6 +155,29 @@ async def main():
     ))
 
     if not use_automatic_mcp_server:
+        # Always register chart tools first (available in both MCP and static modes)
+        def register_chart_tools():
+            """Register chart generation tools that should always be available"""
+            from app.tools.providers.system.chart_tools import (
+                generate_bar_chart, 
+                generate_line_chart, 
+                generate_donut_chart
+            )
+            
+            chart_tools = {
+                "generate_bar_chart": generate_bar_chart,
+                "generate_line_chart": generate_line_chart, 
+                "generate_donut_chart": generate_donut_chart
+            }
+            
+            for name, function in chart_tools.items():
+                llm.register_function(name, function)
+            
+            logger.info(f"✅ Registered {len(chart_tools)} chart tools: {list(chart_tools.keys())}")
+            return chart_tools
+
+        # Register chart tools in static mode
+        chart_tools = register_chart_tools()
         if mode == Mode.LIVE:
             tools, tool_functions = initialize_tools(
                 mode=mode.value,
@@ -136,10 +195,11 @@ async def main():
             )
             
         for name, function in tool_functions.items():
-            logger.info("Initializing the default function tools")
             llm.register_function(name, function)
+        
+        logger.info(f"📋 Static mode: registered {len(tool_functions)} tools + {len(chart_tools)} chart tools")
     else:
-        logger.info(f"Initializing tools from remote MCP server")
+        logger.info(f"🔗 Initializing tools from remote MCP server + chart tools")
         
         mcp_context = {
             "sessionId": args.session_id,
@@ -159,15 +219,60 @@ async def main():
         )
         tools = await mcp_client.register_tools(llm)
 
-    # Simplified event handler for TTS feedback
+        logger.info(f"📊 MCP mode: registered MCP tools + chart tools via MCP client")
+
+    # RTVI events for Pipecat client UI (moved here before TTS debugging code)
+    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+
+    # Create TTS service with highlight filter
+    tts = get_tts_service(
+        tts_provider=tts_provider.value, 
+        voice_name=voice_name.value,
+        session_id=args.session_id
+    )
+    logger.info("[VOICE-DEBUG] ✅ TTS service created with HighlightTextFilter")
+
+
+
+    # Enhanced event handler for TTS feedback with debugging
     @llm.event_handler("on_function_calls_started")
     async def on_function_calls_started(service, function_calls):
+        logger.info(f"[VOICE-DEBUG] 🤖 LLM function calls started: {[fc.function_name for fc in function_calls]}")
         # Only play the "checking" message if using Google TTS
         if tts_provider == TTSProvider.GOOGLE:
             for function_call in function_calls:
                 if function_call.function_name != "get_current_time":
-                    await tts.queue_frame(TTSSpeakFrame("Let me check on that."))
+                    logger.info(f"[VOICE-DEBUG] 🔊 TTS queuing 'Let me check on that' message")
+                    # await tts.queue_frame(TTSSpeakFrame("Let me check on that."))
                     break
+    
+    # Add more LLM event handlers for debugging
+    @llm.event_handler("on_llm_response_start")
+    async def on_llm_response_start(service):
+        logger.info("[VOICE-DEBUG] 🤖 LLM response generation started")
+    
+    @llm.event_handler("on_llm_response_end")
+    async def on_llm_response_end(service, response):
+        logger.info(f"[VOICE-DEBUG] 🤖 LLM response completed: '{response.text if hasattr(response, 'text') else str(response)[:100]}...'")
+    
+    # Add debugging for when LLM receives input
+    original_process_frame = llm.process_frame
+    async def debug_llm_process_frame(frame, direction):
+        if hasattr(frame, 'text') and frame.text:
+            logger.info(f"[VOICE-DEBUG] 🤖 LLM received input: '{frame.text}' | Frame type: {frame.__class__.__name__}")
+        return await original_process_frame(frame, direction)
+    llm.process_frame = debug_llm_process_frame
+    
+    # Add debugging for TTS
+    original_tts_process_frame = tts.process_frame
+    async def debug_tts_process_frame(frame, direction):
+        if hasattr(frame, 'text') and frame.text:
+            logger.info(f"[VOICE-DEBUG] 🔊 TTS received text: '{frame.text}' | Frame type: {frame.__class__.__name__}")
+        elif frame.__class__.__name__ == 'TTSSpeakFrame':
+            speak_text = getattr(frame, 'text', 'Unknown')
+            logger.info(f"[VOICE-DEBUG] 🔊 TTS processing speak frame: '{speak_text}'")
+        return await original_tts_process_frame(frame, direction)
+    tts.process_frame = debug_tts_process_frame
 
     messages = [
         {
@@ -183,25 +288,53 @@ async def main():
 
     context_aggregator = llm.create_context_aggregator(context)
 
-    # RTVI events for Pipecat client UI
-    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+    # Add custom LLMSpyProcessor for streaming function call events (RTVI and TTS created earlier)
+    tool_call_processor = LLMSpyProcessor(rtvi, args.session_id)
 
-    # Add custom LLMSpyProcessor for streaming function call events
-    tool_call_processor = LLMSpyProcessor(rtvi)
+    # Build pipeline components
+    logger.info("[VOICE-DEBUG] 🔨 Building voice processing pipeline...")
+    
+    # Build pipeline components
+    pipeline_components = [
+        transport.input(),
+        stt,
+    ]
+    logger.info(f"[VOICE-DEBUG] ✅ Added transport.input() and STT service")
+    
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            rtvi,
-            context_aggregator.user(),
-            llm,
-            tool_call_processor,
-            tts,
-            transport.output(),
-            context_aggregator.assistant(),
-        ]
-    )
+    if config.ENVIRONMENT.lower() in ["development", "dev"]:
+        test_processor = TestQuestionProcessor(questions=DEFAULT_TEST_QUESTIONS)
+        pipeline_components.append(test_processor)
+        logger.info("🧪 Test Question Processor enabled (development mode)")
+
+    # Add voice locking processor if using Speechmatics with diarization
+    if voice_locking_processor is not None:
+        pipeline_components.append(voice_locking_processor)
+        logger.info("[VOICE-DEBUG] ✅ Added voice locking processor to pipeline")
+    else:
+        logger.info("[VOICE-DEBUG] ⚠️  No voice locking processor - using direct STT flow")
+    
+    # Continue with rest of pipeline
+    pipeline_components.extend([
+        context_aggregator.user(),
+        llm,
+        tool_call_processor,  # Process LLM output, emit chart components, and handle XML highlights
+        rtvi,                 # RTVI processes frames after LLM processing
+        tts,                  # TTS with HighlightTextFilter for XML processing
+        transport.output(),
+        context_aggregator.assistant(),
+    ])
+    logger.info("[VOICE-DEBUG] ✅ Added RTVI, context aggregator, LLM, TTS, and output components")
+    
+    pipeline = Pipeline(pipeline_components)
+    logger.info(f"[VOICE-DEBUG] 🚀 Pipeline created with {len(pipeline_components)} components")
+    
+    # Log the complete pipeline flow
+    component_names = []
+    for i, component in enumerate(pipeline_components):
+        comp_name = component.__class__.__name__
+        component_names.append(f"{i+1}.{comp_name}")
+    logger.info(f"[VOICE-DEBUG] 📋 Pipeline flow: {' → '.join(component_names)}")
 
     user_name = args.user_name or "guest"
     shopId = "euler" if args.euler_token and not args.shop_id else args.shop_id or "dummy"
@@ -222,41 +355,52 @@ async def main():
         task_params["conversation_id"] = conversation_id
         task_params["enable_tracing"] = True
 
+    logger.info(f"[VOICE-DEBUG] 🎯 Creating pipeline task with params: {list(task_params.keys())}")
     task = PipelineTask(pipeline, **task_params)
+    logger.info("[VOICE-DEBUG] ✅ Pipeline task created successfully")
 
     @rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
+        logger.info("[VOICE-DEBUG] 📱 RTVI client ready - setting bot ready")
         await rtvi.set_bot_ready()
 
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(transport, participant):
-        logger.info(f"First participant joined: {participant['id']}")
+        logger.info(f"[VOICE-DEBUG] 👤 First participant joined: {participant['id']}")
+        logger.info("[VOICE-DEBUG] 🚀 Queueing initial context frame to start conversation")
         await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_participant_left")
     async def on_participant_left(transport, participant, reason):
-        logger.info(f"Participant left: {participant['id']}")
+        logger.info(f"[VOICE-DEBUG] 👋 Participant left: {participant['id']} | Reason: {reason}")
         await task.cancel()
 
     @task.event_handler("on_pipeline_cancelled")
     async def on_pipeline_cancelled(task, frame):
-        logger.info("Pipeline task cancelled. Cancelling main task.")
+        logger.info("[VOICE-DEBUG] ❌ Pipeline task cancelled. Cancelling main task.")
         main_task = asyncio.current_task()
         main_task.cancel()
 
+    logger.info("[VOICE-DEBUG] 🏃 Creating pipeline runner")
     runner = PipelineRunner()
 
     async def run_pipeline():
         try:
+            logger.info("[VOICE-DEBUG] 🚀 Starting pipeline runner...")
             await runner.run(task)
+            logger.info("[VOICE-DEBUG] ✅ Pipeline runner completed")
         except asyncio.CancelledError:
-            logger.info("Main task cancelled. Exiting gracefully.")
+            logger.info("[VOICE-DEBUG] ❌ Main task cancelled. Exiting gracefully.")
+        except Exception as e:
+            logger.error(f"[VOICE-DEBUG] ❌ Pipeline runner error: {e}")
+            import traceback
+            logger.error(f"[VOICE-DEBUG] ❌ Traceback: {traceback.format_exc()}")
 
     if config.ENABLE_TRACING:
         langfuse_client = get_client()
         tracer = trace.get_tracer(__name__)
         with tracer.start_as_current_span(conversation_id) as root_span:
-            logger.info(f"Starting current span with conversation ID: {conversation_id}")
+            # logger.info(f"Starting current span with conversation ID: {conversation_id}")
             root_span.set_attribute("conversation.id", conversation_id)
             root_span.set_attribute("conversation.type", "voice")
             root_span.set_attribute("user.name", user_name)
