@@ -25,6 +25,7 @@ from pipecat.services.azure.llm import AzureLLMService
 from pipecat_flows import NodeConfig, FlowsFunctionSchema, FlowManager
 from twilio.rest import Client
 from pydantic import ValidationError
+from pipecat.audio.vad.vad_analyzer import VADParams
 
 from app.agents.voice.breeze_buddy.breeze.order_confirmation.types import OrderData
 from app.core.security.sha import calculate_hmac_sha256
@@ -207,7 +208,7 @@ class OrderConfirmationBot:
                 audio_in_sample_rate=8000,
                 audio_out_sample_rate=8000,
                 enable_metrics=True,
-                enable_usage_metrics=True,
+                enable_usage_metrics=True
             ),
         )
 
