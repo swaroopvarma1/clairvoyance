@@ -91,6 +91,12 @@ MAX_TURNS_BEFORE_SUMMARY = int(os.environ.get("MAX_TURNS_BEFORE_SUMMARY", 10))
 KEEP_RECENT_TURNS = int(os.environ.get("KEEP_RECENT_TURNS", 2))
 
 BREEZE_BUDDY_CALL_PROVIDER = os.environ.get("BREEZE_BUDDY_CALL_PROVIDER", "twilio")
+#SPEECHMATICS
+SPEECHMATICS_API_KEY = os.environ.get("SPEECHMATICS_API_KEY")  # Note: Matches your .env spelling
+ENABLE_SPEAKER_DIARIZATION = os.environ.get("ENABLE_SPEAKER_DIARIZATION", "true").lower() == "true"
+SPEAKER_SENSITIVITY = float(os.environ.get("SPEAKER_SENSITIVITY", "0.5"))
+MAX_SPEAKERS = int(os.environ.get("MAX_SPEAKERS", "5"))
+ENABLE_VOICE_LOCKING = os.environ.get("ENABLE_VOICE_LOCKING", "true").lower() == "true"
 
 # Twilio settings
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
