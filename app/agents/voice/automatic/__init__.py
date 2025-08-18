@@ -81,18 +81,49 @@ async def main():
     # Personalize the system prompt if a user name is provided
     system_prompt = get_system_prompt(args.user_name, tts_provider)
 
+    # Create VAD analyzer with a reference for real-time updates
+    vad_analyzer = SileroVADAnalyzer(
+        sample_rate=16000,
+        params=VADParams(
+            confidence=config.VAD_CONFIDENCE,
+            start_secs=0.30,
+            stop_secs=1.00,
+            min_volume=config.VAD_MIN_VOLUME,
+        )
+    )
+    
+    # Log initial VAD configuration
+    logger.info(f"🎯 VAD ANALYZER INITIALIZED - ID: {id(vad_analyzer)}, Params ID: {id(vad_analyzer._params)}")
+    logger.info(f"🎯 Initial VAD params: confidence={vad_analyzer._params.confidence}, start_secs={vad_analyzer._params.start_secs}, stop_secs={vad_analyzer._params.stop_secs}, min_volume={vad_analyzer._params.min_volume}")
+    
+    # Create a wrapper to log VAD usage periodically
+    class VADLoggingWrapper:
+        def __init__(self, original_vad):
+            self.original_vad = original_vad
+            self._params = original_vad._params  # Expose the same _params for updates
+            self.call_count = 0
+            
+        def analyze_audio(self, audio_data):
+            self.call_count += 1
+            
+            # Log current parameters every 500 calls (~10 seconds of audio)
+            if self.call_count % 500 == 0:
+                logger.info(f"🔊 VAD PROCESSING - Call #{self.call_count}, Using params: confidence={self._params.confidence}, start_secs={self._params.start_secs}, stop_secs={self._params.stop_secs}, min_volume={self._params.min_volume}")
+            
+            # Call original VAD analyzer
+            return self.original_vad.analyze_audio(audio_data)
+            
+        def __getattr__(self, name):
+            # Delegate all other attributes to original VAD
+            return getattr(self.original_vad, name)
+    
+    # Wrap the VAD analyzer for logging
+    vad_analyzer = VADLoggingWrapper(vad_analyzer)
+    
     daily_params = DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
-        vad_analyzer=SileroVADAnalyzer(
-            sample_rate=16000,
-            params=VADParams(
-                confidence=config.VAD_CONFIDENCE,
-                start_secs=0.30,
-                stop_secs=1.00,
-                min_volume=config.VAD_MIN_VOLUME,
-            )
-        ),
+        vad_analyzer=vad_analyzer,
     )
 
     if config.ENABLE_NOISE_REDUCE_FILTER:
@@ -104,6 +135,14 @@ async def main():
         "Breeze Automatic Voice Agent",
         daily_params,
     )
+    
+    # Log object reference verification
+    logger.info(f"🔍 OBJECT REFERENCE VERIFICATION:")
+    logger.info(f"  - Our VAD analyzer ID: {id(vad_analyzer)}")
+    logger.info(f"  - DailyParams VAD ID: {id(daily_params.vad_analyzer)}")
+    logger.info(f"  - Same object? {vad_analyzer is daily_params.vad_analyzer}")
+    logger.info(f"  - VAD params object ID: {id(vad_analyzer._params)}")
+    logger.info(f"🚀 All components will use the SAME VAD analyzer object for real-time updates")
 
     # Choose STT service based on speaker diarization configuration
     if config.ENABLE_SPEAKER_DIARIZATION and config.SPEECHMATICS_API_KEY:
@@ -264,6 +303,101 @@ async def main():
     async def on_client_ready(rtvi):
         del rtvi
         await rtvi.set_bot_ready()
+
+    @rtvi.event_handler("on_client_message")
+    async def on_client_message(rtvi, message):
+        """Handle custom client messages for real-time parameter updates."""
+        try:
+            action = message.get("action")
+            data = message.get("data", {})
+            
+            if action == "update_vad_params":
+                await update_vad_parameters(rtvi, vad_analyzer, data)
+            else:
+                await rtvi.send_message({
+                    "type": "error",
+                    "message": f"Unknown action: {action}"
+                })
+        except Exception as e:
+            logger.error(f"Error handling client message: {e}")
+            await rtvi.send_message({
+                "type": "error", 
+                "message": f"Error processing message: {str(e)}"
+            })
+
+    async def update_vad_parameters(rtvi, vad_analyzer, params):
+        """Update VAD analyzer parameters in real-time with validation."""
+        try:
+            current_params = vad_analyzer._params
+            
+            # Log current state before update
+            logger.info(f"🎯 VAD UPDATE REQUEST - Current params: confidence={current_params.confidence}, start_secs={current_params.start_secs}, stop_secs={current_params.stop_secs}, min_volume={current_params.min_volume}")
+            logger.info(f"🔍 VAD OBJECT VERIFICATION - VAD analyzer ID: {id(vad_analyzer)}, VAD params ID: {id(current_params)}")
+            
+            # Validate parameter ranges
+            valid_params = {}
+            
+            if "confidence" in params:
+                confidence = float(params["confidence"])
+                if 0.0 <= confidence <= 1.0:
+                    valid_params["confidence"] = confidence
+                else:
+                    raise ValueError("Confidence must be between 0.0 and 1.0")
+            
+            if "start_secs" in params:
+                start_secs = float(params["start_secs"])
+                if 0.0 <= start_secs <= 5.0:
+                    valid_params["start_secs"] = start_secs
+                else:
+                    raise ValueError("start_secs must be between 0.0 and 5.0")
+            
+            if "stop_secs" in params:
+                stop_secs = float(params["stop_secs"])
+                if 0.1 <= stop_secs <= 10.0:
+                    valid_params["stop_secs"] = stop_secs
+                else:
+                    raise ValueError("stop_secs must be between 0.1 and 10.0")
+            
+            if "min_volume" in params:
+                min_volume = float(params["min_volume"])
+                if 0.0 <= min_volume <= 1.0:
+                    valid_params["min_volume"] = min_volume
+                else:
+                    raise ValueError("min_volume must be between 0.0 and 1.0")
+            
+            if not valid_params:
+                raise ValueError("No valid parameters provided")
+            
+            # Update VAD analyzer parameters with detailed logging
+            for param, new_value in valid_params.items():
+                old_value = getattr(current_params, param)
+                setattr(current_params, param, new_value)
+                logger.info(f"✅ VAD PARAMETER UPDATED: {param} changed from {old_value} → {new_value}")
+            
+            # Verify the changes took effect
+            logger.info(f"🎯 VAD UPDATE COMPLETE - New params: confidence={current_params.confidence}, start_secs={current_params.start_secs}, stop_secs={current_params.stop_secs}, min_volume={current_params.min_volume}")
+            logger.info(f"🚀 VAD analyzer is now using updated parameters for subsequent audio processing")
+            
+            # Send confirmation back to client
+            await rtvi.send_message({
+                "type": "vad_params_updated",
+                "data": {
+                    "updated_params": valid_params,
+                    "current_params": {
+                        "confidence": current_params.confidence,
+                        "start_secs": current_params.start_secs,
+                        "stop_secs": current_params.stop_secs,
+                        "min_volume": current_params.min_volume
+                    }
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating VAD parameters: {e}")
+            await rtvi.send_message({
+                "type": "error",
+                "message": f"Failed to update VAD parameters: {str(e)}"
+            })
 
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(transport, participant):
