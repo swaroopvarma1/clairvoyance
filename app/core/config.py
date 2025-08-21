@@ -131,3 +131,15 @@ BREEZE_BUDDY_TEST_SHOPIFY_ADMIN_TOKEN = os.getenv("BREEZE_BUDDY_TEST_SHOPIFY_ADM
 # Session inactivity timeout
 AUTOMATIC_SESSION_INACTIVITY_TIMEOUT = float(os.environ.get("AUTOMATIC_SESSION_INACTIVITY_TIMEOUT", 900.0))
 MAX_DAILY_SESSION_LIMIT = int(os.environ.get("MAX_DAILY_SESSION_LIMIT", 1800))
+
+# Function Confirmation Configuration
+ENABLE_FUNCTION_CONFIRMATION = os.environ.get("ENABLE_FUNCTION_CONFIRMATION", "true").lower() == "true"
+LIGHTHOUSE_BASE_URL = os.environ.get("LIGHTHOUSE_BASE_URL", "http://localhost:5173")
+FUNCTION_CONFIRMATION_TIMEOUT = int(os.environ.get("FUNCTION_CONFIRMATION_TIMEOUT", "30"))
+
+logger.info(f"Function confirmation enabled: {ENABLE_FUNCTION_CONFIRMATION}")
+logger.info(f"Lighthouse base URL: {LIGHTHOUSE_BASE_URL}")
+
+# Session inactivity timeout
+AUTOMATIC_SESSION_INACTIVITY_TIMEOUT = float(os.environ.get("AUTOMATIC_SESSION_INACTIVITY_TIMEOUT", 900.0))
+MAX_DAILY_SESSION_LIMIT = int(os.environ.get("MAX_DAILY_SESSION_LIMIT", 1800))
